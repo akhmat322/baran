@@ -53,26 +53,44 @@ const MAX_POINTS = 200;
  * ============================================================ */
 
 function setupTriggers() {
+  // Удаляем старые триггеры этого скрипта
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
     var name = trigger.getHandlerFunction();
-    if (name === "onEditHandler" || name === "onChangeHandler") {
+    if (name === "onEditHandler" || name === "onChangeHandler" || name === "hourlyRecalculate_") {
       ScriptApp.deleteTrigger(trigger);
     }
   });
 
   var ssId = SpreadsheetApp.getActiveSpreadsheet().getId();
 
+  // При редактировании
   ScriptApp.newTrigger("onEditHandler")
     .forSpreadsheet(ssId)
     .onEdit()
     .create();
 
+  // При структурных изменениях
   ScriptApp.newTrigger("onChangeHandler")
     .forSpreadsheet(ssId)
     .onChange()
     .create();
 
-  Logger.log("Триггеры установлены");
+  // Каждый час — автопересчёт
+  ScriptApp.newTrigger("hourlyRecalculate_")
+    .timeBased()
+    .everyHours(1)
+    .create();
+
+  Logger.log("Триггеры установлены (onEdit + onChange + каждый час)");
+}
+
+/**
+ * Вызывается по часовому триггеру.
+ * Пересчитывает все данные автоматически.
+ */
+function hourlyRecalculate_() {
+  recalculateMain_();
+  Logger.log("Часовой пересчёт выполнен: " + new Date());
 }
 
 
