@@ -216,8 +216,10 @@ function recalculateMain_() {
     var points, pct;
 
     if (isTraining) {
-      // ── Обучение = "Да" → 100% нагрузки, баллы = MAX ──
-      points = MAX_POINTS;
+      // ── Обучение = "Да" → 100% нагрузки, баллы считаются без обучения ──
+      points = errors   * cfg.pointsPerError
+             + trainees * cfg.pointsPerTrainee
+             + projectsCnt * cfg.pointsPerProject;
       pct    = cfg.pctTraining;
     } else {
       // ── Обычный расчёт: ошибки + стажёры + проекты ──
