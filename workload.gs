@@ -463,7 +463,12 @@ function buildCharts_() {
   var lastRow = getMainLastDataRow_(sheet, MAIN_START_ROW);
   if (lastRow < MAIN_START_ROW) return;
 
+  // Удаляем старые диаграммы
   sheet.getCharts().forEach(function (c) { sheet.removeChart(c); });
+
+  // Очищаем область справа от данных (убираем мусор от старых диаграмм/данных)
+  var clearRange = sheet.getRange("I20:K50");
+  clearRange.clearContent();
 
   // 1. Нагрузка сотрудников
   var chart1 = sheet.newChart()
@@ -472,7 +477,7 @@ function buildCharts_() {
     .addRange(sheet.getRange("H" + MAIN_START_ROW + ":H" + lastRow))
     .setOption("title", "Нагрузка сотрудников")
     .setOption("pieSliceText", "percentage")
-    .setOption("legend.position", "right")
+    .setOption("legend", {position: "none"})
     .setOption("width", 500).setOption("height", 350)
     .setPosition(MAIN_START_ROW, 14, 0, 0)
     .build();
@@ -495,7 +500,7 @@ function buildCharts_() {
     .addRange(tempSheet.getRange(1, 2, zoneData.length + 1, 1))
     .setOption("title", "Распределение по зонам")
     .setOption("pieSliceText", "percentage")
-    .setOption("legend.position", "right")
+    .setOption("legend", {position: "none"})
     .setOption("width", 500).setOption("height", 350)
     .setPosition(20, 14, 0, 0)
     .build();
