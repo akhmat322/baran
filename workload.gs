@@ -22,19 +22,25 @@ const STAFF_COL_A      = 1;  // A — заголовок стола / имя
 const STAFF_COL_STATUS = 2;  // B — статус
 
 // ─── Колонки главного листа ──────────────────────────────────
-const MAIN_COL_NAME     = 1;  // A — Сотрудник
-const MAIN_COL_ZONE     = 2;  // B — Зона
-const MAIN_COL_ERRORS   = 3;  // C — Ошибки
-const MAIN_COL_TRAINEES = 4;  // D — Стажёры
-const MAIN_COL_PROJECTS = 5;  // E — Проекты (вручную)
-const MAIN_COL_POINTS   = 6;  // F — Баллы (авто)
-const MAIN_COL_PERCENT  = 7;  // G — %Нагрузки (авто)
+const MAIN_COL_NAME       = 1;  // A — Сотрудник
+const MAIN_COL_ZONE       = 2;  // B — Зона
+const MAIN_COL_ERRORS     = 3;  // C — Ошибки
+const MAIN_COL_TRAINEES   = 4;  // D — Стажёры
+const MAIN_COL_HAS_PROJ   = 5;  // E — Есть проект (Да/Нет)
+const MAIN_COL_HAS_TRAIN  = 6;  // F — Есть обучение (Да/Нет)
+const MAIN_COL_PROJECTS   = 7;  // G — Проекты (вручную)
+const MAIN_COL_POINTS     = 8;  // H — Баллы (авто)
+const MAIN_COL_PERCENT    = 9;  // I — %Нагрузки (авто)
 
 // ─── Ячейки с настройками баллов (на главном листе) ──────────
-const CFG_POINTS_PER_TRAINEE = "I2";  // Баллы за стажёра  (10)
-const CFG_PCT_PER_TRAINEE    = "I3";  // % за стажёра      (5%)
-const CFG_POINTS_PER_ERROR   = "I4";  // Баллы за ошибку   (2)
-const CFG_PCT_PER_ERROR      = "I5";  // % за ошибку       (1%)
+const CFG_POINTS_PER_TRAINEE  = "K2";  // Баллы за стажёра     (10)
+const CFG_PCT_PER_TRAINEE     = "K3";  // % за стажёра         (5%)
+const CFG_POINTS_PER_ERROR    = "K4";  // Баллы за ошибку      (2)
+const CFG_PCT_PER_ERROR       = "K5";  // % за ошибку          (1%)
+const CFG_POINTS_PER_PROJECT  = "K6";  // Баллы за проект      (8)
+const CFG_PCT_PER_PROJECT     = "K7";  // % за проект          (4%)
+const CFG_POINTS_PER_TRAINING = "K8";  // Баллы за обучение    (6)
+const CFG_PCT_PER_TRAINING    = "K9";  // % за обучение        (3%)
 
 // ─── Фильтрация ─────────────────────────────────────────────
 const STATUS_TARGET = "не обработано";
@@ -103,8 +109,10 @@ function onEditHandler(e) {
     return;
   }
 
-  // Главный лист — зона или проекты
-  if (sheetName === MAIN_SHEET_NAME && (col === MAIN_COL_ZONE || col === MAIN_COL_PROJECTS)) {
+  // Главный лист — зона, проекты, есть проект, есть обучение
+  if (sheetName === MAIN_SHEET_NAME &&
+      (col === MAIN_COL_ZONE || col === MAIN_COL_PROJECTS ||
+       col === MAIN_COL_HAS_PROJ || col === MAIN_COL_HAS_TRAIN)) {
     recalculateMain_();
   }
 }
@@ -174,28 +182,34 @@ function recalculateMain_() {
   if (mainLast < MAIN_START_ROW) return;
   var numRows = mainLast - MAIN_START_ROW + 1;
 
-  // ── Batch-чтение зон и проектов ──
+  // ── Batch-чтение зон, проект/обучение, проекты ──
   var mainData = mainSheet.getRange(MAIN_START_ROW, 1, numRows, MAIN_COL_PROJECTS).getDisplayValues();
 
-  // ── Формируем выходные колонки C, D, F, G ──
+  // ── Формируем выходные колонки C, D, H, I ──
   var outErrors   = [];
   var outTrainees = [];
   var outPoints   = [];
   var outPercent  = [];
 
   for (var i = 0; i < numRows; i++) {
-    var zoneKey  = normDeskKey_(mainData[i][MAIN_COL_ZONE - 1]);
-    var projects = parseNumber_(mainData[i][MAIN_COL_PROJECTS - 1]);
+    var zoneKey    = normDeskKey_(mainData[i][MAIN_COL_ZONE - 1]);
+    var hasProject  = normYesNo_(mainData[i][MAIN_COL_HAS_PROJ - 1]);
+    var hasTraining = normYesNo_(mainData[i][MAIN_COL_HAS_TRAIN - 1]);
+    var projects   = parseNumber_(mainData[i][MAIN_COL_PROJECTS - 1]);
 
     var errors   = zoneKey ? getCountForDeskOrGroup_(errorCounts, zoneKey) : 0;
     var trainees = zoneKey ? getCountForDeskOrGroup_(traineeCounts, zoneKey) : 0;
 
     var points = errors   * cfg.pointsPerError
                + trainees * cfg.pointsPerTrainee
-               + projects;
+               + projects
+               + (hasProject  ? cfg.pointsPerProject  : 0)
+               + (hasTraining ? cfg.pointsPerTraining : 0);
 
     var pct = errors   * cfg.pctPerError
-            + trainees * cfg.pctPerTrainee;
+            + trainees * cfg.pctPerTrainee
+            + (hasProject  ? cfg.pctPerProject  : 0)
+            + (hasTraining ? cfg.pctPerTraining : 0);
 
     // Добавляем % от проектов: проекты / MAX_POINTS
     if (MAX_POINTS > 0) {
@@ -224,16 +238,24 @@ function recalculateMain_() {
  * ============================================================ */
 
 function readConfig_(mainSheet) {
-  var pointsPerTrainee = parseNumber_(mainSheet.getRange(CFG_POINTS_PER_TRAINEE).getValue()) || 10;
-  var pctPerTrainee    = parseNumber_(mainSheet.getRange(CFG_PCT_PER_TRAINEE).getValue())    || 0.05;
-  var pointsPerError   = parseNumber_(mainSheet.getRange(CFG_POINTS_PER_ERROR).getValue())   || 2;
-  var pctPerError      = parseNumber_(mainSheet.getRange(CFG_PCT_PER_ERROR).getValue())      || 0.01;
+  var pointsPerTrainee  = parseNumber_(mainSheet.getRange(CFG_POINTS_PER_TRAINEE).getValue())  || 10;
+  var pctPerTrainee     = parseNumber_(mainSheet.getRange(CFG_PCT_PER_TRAINEE).getValue())     || 0.05;
+  var pointsPerError    = parseNumber_(mainSheet.getRange(CFG_POINTS_PER_ERROR).getValue())    || 2;
+  var pctPerError       = parseNumber_(mainSheet.getRange(CFG_PCT_PER_ERROR).getValue())       || 0.01;
+  var pointsPerProject  = parseNumber_(mainSheet.getRange(CFG_POINTS_PER_PROJECT).getValue())  || 8;
+  var pctPerProject     = parseNumber_(mainSheet.getRange(CFG_PCT_PER_PROJECT).getValue())     || 0.04;
+  var pointsPerTraining = parseNumber_(mainSheet.getRange(CFG_POINTS_PER_TRAINING).getValue()) || 6;
+  var pctPerTraining    = parseNumber_(mainSheet.getRange(CFG_PCT_PER_TRAINING).getValue())    || 0.03;
 
   return {
-    pointsPerTrainee: pointsPerTrainee,
-    pctPerTrainee:    pctPerTrainee,
-    pointsPerError:   pointsPerError,
-    pctPerError:      pctPerError
+    pointsPerTrainee:  pointsPerTrainee,
+    pctPerTrainee:     pctPerTrainee,
+    pointsPerError:    pointsPerError,
+    pctPerError:       pctPerError,
+    pointsPerProject:  pointsPerProject,
+    pctPerProject:     pctPerProject,
+    pointsPerTraining: pointsPerTraining,
+    pctPerTraining:    pctPerTraining
   };
 }
 
@@ -347,7 +369,7 @@ function applyConditionalFormatting_() {
 
   sheet.setFrozenRows(2);
 
-  var percentRange = sheet.getRange("G3:G1000");
+  var percentRange = sheet.getRange("I3:I1000");
   sheet.clearConditionalFormatRules();
 
   var rules = [
@@ -386,7 +408,7 @@ function buildCharts_() {
   var chart1 = sheet.newChart()
     .setChartType(Charts.ChartType.PIE)
     .addRange(sheet.getRange("A" + MAIN_START_ROW + ":A" + lastRow))
-    .addRange(sheet.getRange("G" + MAIN_START_ROW + ":G" + lastRow))
+    .addRange(sheet.getRange("I" + MAIN_START_ROW + ":I" + lastRow))
     .setOption("title", "Нагрузка сотрудников")
     .setOption("pieSliceText", "percentage")
     .setOption("legend.position", "right")
@@ -508,6 +530,11 @@ function normDeskKey_(value) {
 function parseNumber_(value) {
   var n = Number(value);
   return isNaN(n) ? 0 : n;
+}
+
+function normYesNo_(value) {
+  var s = norm_(value);
+  return s === "да" || s === "yes";
 }
 
 function toDate_(value) {
