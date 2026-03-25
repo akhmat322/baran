@@ -1,6 +1,6 @@
 /* ============================================================
  *  Нагрузка T&A — автоматизация Google Sheets
- *  v2.0
+ *  v3.0
  * ============================================================ */
 
 // ─── Листы ───────────────────────────────────────────────────
@@ -24,23 +24,22 @@ const STAFF_COL_STATUS = 2;  // B — статус
 // ─── Колонки главного листа ──────────────────────────────────
 const MAIN_COL_NAME       = 1;  // A — Сотрудник
 const MAIN_COL_ZONE       = 2;  // B — Зона
-const MAIN_COL_ERRORS     = 3;  // C — Ошибки
-const MAIN_COL_TRAINEES   = 4;  // D — Стажёры
-const MAIN_COL_HAS_PROJ   = 5;  // E — Есть проект (Да/Нет)
-const MAIN_COL_HAS_TRAIN  = 6;  // F — Есть обучение (Да/Нет)
-const MAIN_COL_PROJECTS   = 7;  // G — Проекты (вручную)
-const MAIN_COL_POINTS     = 8;  // H — Баллы (авто)
-const MAIN_COL_PERCENT    = 9;  // I — %Нагрузки (авто)
+const MAIN_COL_ERRORS     = 3;  // C — Ошибки (авто)
+const MAIN_COL_TRAINEES   = 4;  // D — Стажёры (авто)
+const MAIN_COL_HAS_TRAIN  = 5;  // E — Есть обучение (чекбокс)
+const MAIN_COL_HAS_PROJ   = 6;  // F — Есть проект (чекбокс)
+const MAIN_COL_POINTS     = 7;  // G — Баллы (авто)
+const MAIN_COL_PERCENT    = 8;  // H — %Нагрузки (авто)
 
-// ─── Ячейки с настройками баллов (на главном листе) ──────────
+// ─── Ячейки с настройками баллов (на главном листе, колонки J-K) ──
 const CFG_POINTS_PER_TRAINEE  = "K2";  // Баллы за стажёра     (10)
 const CFG_PCT_PER_TRAINEE     = "K3";  // % за стажёра         (5%)
 const CFG_POINTS_PER_ERROR    = "K4";  // Баллы за ошибку      (2)
 const CFG_PCT_PER_ERROR       = "K5";  // % за ошибку          (1%)
-const CFG_POINTS_PER_PROJECT  = "K6";  // Баллы за проект      (8)
-const CFG_PCT_PER_PROJECT     = "K7";  // % за проект          (4%)
-const CFG_POINTS_PER_TRAINING = "K8";  // Баллы за обучение    (6)
-const CFG_PCT_PER_TRAINING    = "K9";  // % за обучение        (3%)
+const CFG_POINTS_PER_PROJECT  = "K6";  // Баллы за проект      (20)
+const CFG_PCT_PER_PROJECT     = "K7";  // % за проект          (20)
+const CFG_POINTS_PER_TRAINING = "K8";  // Баллы за обучение    (40)
+const CFG_PCT_PER_TRAINING    = "K9";  // % за обучение        (40)
 
 // ─── Фильтрация ─────────────────────────────────────────────
 const STATUS_TARGET = "не обработано";
@@ -54,12 +53,7 @@ const MAX_POINTS = 200;
  *  ТРИГГЕРЫ
  * ============================================================ */
 
-/**
- * Устанавливает onEdit и onChange триггеры.
- * Запускать один раз вручную.
- */
 function setupTriggers() {
-  // Удаляем старые триггеры этого скрипта
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
     var name = trigger.getHandlerFunction();
     if (name === "onEditHandler" || name === "onChangeHandler") {
@@ -109,10 +103,10 @@ function onEditHandler(e) {
     return;
   }
 
-  // Главный лист — зона, проекты, есть проект, есть обучение
+  // Главный лист — зона, чекбоксы обучение/проект
   if (sheetName === MAIN_SHEET_NAME &&
-      (col === MAIN_COL_ZONE || col === MAIN_COL_PROJECTS ||
-       col === MAIN_COL_HAS_PROJ || col === MAIN_COL_HAS_TRAIN)) {
+      (col === MAIN_COL_ZONE ||
+       col === MAIN_COL_HAS_TRAIN || col === MAIN_COL_HAS_PROJ)) {
     recalculateMain_();
   }
 }
@@ -156,10 +150,6 @@ function fillStatusMirrorColumnR_() {
  *  ГЛАВНЫЙ ПЕРЕСЧЁТ — ошибки, стажёры, баллы, %
  * ============================================================ */
 
-/**
- * Единая точка пересчёта: читает все данные один раз,
- * записывает колонки C, D, F, G за один проход.
- */
 function recalculateMain_() {
   var ss         = SpreadsheetApp.getActiveSpreadsheet();
   var mainSheet  = ss.getSheetByName(MAIN_SHEET_NAME);
@@ -182,39 +172,34 @@ function recalculateMain_() {
   if (mainLast < MAIN_START_ROW) return;
   var numRows = mainLast - MAIN_START_ROW + 1;
 
-  // ── Batch-чтение зон, проект/обучение, проекты ──
-  var mainData = mainSheet.getRange(MAIN_START_ROW, 1, numRows, MAIN_COL_PROJECTS).getDisplayValues();
+  // ── Batch-чтение: зоны + чекбоксы (колонки A-F) ──
+  var mainData = mainSheet.getRange(MAIN_START_ROW, 1, numRows, MAIN_COL_HAS_PROJ).getValues();
 
-  // ── Формируем выходные колонки C, D, H, I ──
+  // ── Формируем выходные колонки C, D, G, H ──
   var outErrors   = [];
   var outTrainees = [];
   var outPoints   = [];
   var outPercent  = [];
 
   for (var i = 0; i < numRows; i++) {
-    var zoneKey    = normDeskKey_(mainData[i][MAIN_COL_ZONE - 1]);
-    var hasProject  = normYesNo_(mainData[i][MAIN_COL_HAS_PROJ - 1]);
-    var hasTraining = normYesNo_(mainData[i][MAIN_COL_HAS_TRAIN - 1]);
-    var projects   = parseNumber_(mainData[i][MAIN_COL_PROJECTS - 1]);
+    var zoneKey     = normDeskKey_(mainData[i][MAIN_COL_ZONE - 1]);
+    var hasTraining = isChecked_(mainData[i][MAIN_COL_HAS_TRAIN - 1]);
+    var hasProject  = isChecked_(mainData[i][MAIN_COL_HAS_PROJ - 1]);
 
     var errors   = zoneKey ? getCountForDeskOrGroup_(errorCounts, zoneKey) : 0;
     var trainees = zoneKey ? getCountForDeskOrGroup_(traineeCounts, zoneKey) : 0;
 
+    // ── Баллы ──
     var points = errors   * cfg.pointsPerError
                + trainees * cfg.pointsPerTrainee
-               + projects
                + (hasProject  ? cfg.pointsPerProject  : 0)
                + (hasTraining ? cfg.pointsPerTraining : 0);
 
+    // ── % нагрузки ──
     var pct = errors   * cfg.pctPerError
             + trainees * cfg.pctPerTrainee
             + (hasProject  ? cfg.pctPerProject  : 0)
             + (hasTraining ? cfg.pctPerTraining : 0);
-
-    // Добавляем % от проектов: проекты / MAX_POINTS
-    if (MAX_POINTS > 0) {
-      pct += projects / MAX_POINTS;
-    }
 
     // Ограничиваем 100%
     if (pct > 1) pct = 1;
@@ -239,13 +224,13 @@ function recalculateMain_() {
 
 function readConfig_(mainSheet) {
   var pointsPerTrainee  = parseNumber_(mainSheet.getRange(CFG_POINTS_PER_TRAINEE).getValue())  || 10;
-  var pctPerTrainee     = parseNumber_(mainSheet.getRange(CFG_PCT_PER_TRAINEE).getValue())     || 0.05;
+  var pctPerTrainee     = ensureDecimal_(mainSheet.getRange(CFG_PCT_PER_TRAINEE).getValue(),     0.05);
   var pointsPerError    = parseNumber_(mainSheet.getRange(CFG_POINTS_PER_ERROR).getValue())    || 2;
-  var pctPerError       = parseNumber_(mainSheet.getRange(CFG_PCT_PER_ERROR).getValue())       || 0.01;
-  var pointsPerProject  = parseNumber_(mainSheet.getRange(CFG_POINTS_PER_PROJECT).getValue())  || 8;
-  var pctPerProject     = parseNumber_(mainSheet.getRange(CFG_PCT_PER_PROJECT).getValue())     || 0.04;
-  var pointsPerTraining = parseNumber_(mainSheet.getRange(CFG_POINTS_PER_TRAINING).getValue()) || 6;
-  var pctPerTraining    = parseNumber_(mainSheet.getRange(CFG_PCT_PER_TRAINING).getValue())    || 0.03;
+  var pctPerError       = ensureDecimal_(mainSheet.getRange(CFG_PCT_PER_ERROR).getValue(),       0.01);
+  var pointsPerProject  = parseNumber_(mainSheet.getRange(CFG_POINTS_PER_PROJECT).getValue())  || 20;
+  var pctPerProject     = ensureDecimal_(mainSheet.getRange(CFG_PCT_PER_PROJECT).getValue(),     0.20);
+  var pointsPerTraining = parseNumber_(mainSheet.getRange(CFG_POINTS_PER_TRAINING).getValue()) || 40;
+  var pctPerTraining    = ensureDecimal_(mainSheet.getRange(CFG_PCT_PER_TRAINING).getValue(),    0.40);
 
   return {
     pointsPerTrainee:  pointsPerTrainee,
@@ -257,6 +242,75 @@ function readConfig_(mainSheet) {
     pointsPerTraining: pointsPerTraining,
     pctPerTraining:    pctPerTraining
   };
+}
+
+/**
+ * Если значение > 1, значит введено как целое число (20 = 20%).
+ * Если <= 1, значит уже десятичное (0.05 = 5%).
+ * Если пусто или 0, возвращает fallback.
+ */
+function ensureDecimal_(value, fallback) {
+  var n = parseNumber_(value);
+  if (!n) return fallback;
+  return n > 1 ? n / 100 : n;
+}
+
+
+/* ============================================================
+ *  ЧЕКБОКСЫ — установка в колонки E и F
+ * ============================================================ */
+
+/**
+ * Вставляет чекбоксы (Да/Нет) в колонки E и F для всех строк с данными.
+ * Запустить один раз из меню «Нагрузка T&A → Вставить чекбоксы».
+ */
+function insertCheckboxes() {
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(MAIN_SHEET_NAME);
+  if (!sheet) return;
+
+  var lastRow = getMainLastDataRow_(sheet, MAIN_START_ROW);
+  if (lastRow < MAIN_START_ROW) return;
+  var numRows = lastRow - MAIN_START_ROW + 1;
+
+  // Валидация: чекбокс с Да/Нет
+  var rule = SpreadsheetApp.newDataValidation()
+    .requireCheckbox("Да", "Нет")
+    .setAllowInvalid(false)
+    .build();
+
+  // Колонка E — Есть обучение
+  var rangeE = sheet.getRange(MAIN_START_ROW, MAIN_COL_HAS_TRAIN, numRows, 1);
+  rangeE.setDataValidation(rule);
+  // Устанавливаем "Нет" только в пустые ячейки
+  var valuesE = rangeE.getValues();
+  for (var i = 0; i < valuesE.length; i++) {
+    if (!valuesE[i][0] || valuesE[i][0] === "" || valuesE[i][0] === false) {
+      valuesE[i][0] = "Нет";
+    }
+  }
+  rangeE.setValues(valuesE);
+
+  // Колонка F — Есть проект
+  var rangeF = sheet.getRange(MAIN_START_ROW, MAIN_COL_HAS_PROJ, numRows, 1);
+  rangeF.setDataValidation(rule);
+  var valuesF = rangeF.getValues();
+  for (var i = 0; i < valuesF.length; i++) {
+    if (!valuesF[i][0] || valuesF[i][0] === "" || valuesF[i][0] === false) {
+      valuesF[i][0] = "Нет";
+    }
+  }
+  rangeF.setValues(valuesF);
+
+  // Выравнивание по центру
+  rangeE.setHorizontalAlignment("center");
+  rangeF.setHorizontalAlignment("center");
+
+  SpreadsheetApp.getUi().alert(
+    "Чекбоксы установлены в колонках E и F (строки " +
+    MAIN_START_ROW + "–" + lastRow + ").\n" +
+    "Нажмите на чекбокс, чтобы переключить Да/Нет."
+  );
 }
 
 
@@ -325,11 +379,9 @@ function countTraineesByDeskStructured_(staffSheet) {
  * ============================================================ */
 
 function getCountForDeskOrGroup_(countsMap, key) {
-  // Если ключ содержит цифру — ищем точное совпадение
   if (/\d/.test(key)) {
     return countsMap.get(key) || 0;
   }
-  // Иначе суммируем все столы группы
   var sum = 0;
   countsMap.forEach(function (count, deskKey) {
     if (deskKey === key || deskKey.indexOf(key + " ") === 0) {
@@ -360,16 +412,14 @@ function isDeskHeader_(colA, colB) {
  *  ФОРМАТИРОВАНИЕ И ДИАГРАММЫ
  * ============================================================ */
 
-/**
- * Применяет условное форматирование к колонке %Нагрузки.
- */
 function applyConditionalFormatting_() {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(MAIN_SHEET_NAME);
   if (!sheet) return;
 
   sheet.setFrozenRows(2);
 
-  var percentRange = sheet.getRange("I3:I1000");
+  var percentCol = "H";
+  var percentRange = sheet.getRange(percentCol + "3:" + percentCol + "1000");
   sheet.clearConditionalFormatRules();
 
   var rules = [
@@ -390,9 +440,6 @@ function applyConditionalFormatting_() {
   sheet.autoResizeColumns(1, MAIN_COL_PERCENT);
 }
 
-/**
- * Создаёт круговые диаграммы нагрузки и зон.
- */
 function buildCharts_() {
   var ss    = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(MAIN_SHEET_NAME);
@@ -401,19 +448,20 @@ function buildCharts_() {
   var lastRow = getMainLastDataRow_(sheet, MAIN_START_ROW);
   if (lastRow < MAIN_START_ROW) return;
 
-  // Удаляем старые диаграммы
   sheet.getCharts().forEach(function (c) { sheet.removeChart(c); });
+
+  var percentCol = "H";
 
   // 1. Нагрузка сотрудников
   var chart1 = sheet.newChart()
     .setChartType(Charts.ChartType.PIE)
     .addRange(sheet.getRange("A" + MAIN_START_ROW + ":A" + lastRow))
-    .addRange(sheet.getRange("I" + MAIN_START_ROW + ":I" + lastRow))
+    .addRange(sheet.getRange(percentCol + MAIN_START_ROW + ":" + percentCol + lastRow))
     .setOption("title", "Нагрузка сотрудников")
     .setOption("pieSliceText", "percentage")
     .setOption("legend.position", "right")
     .setOption("width", 500).setOption("height", 350)
-    .setPosition(MAIN_START_ROW, 12, 0, 0)
+    .setPosition(MAIN_START_ROW, 14, 0, 0)
     .build();
   sheet.insertChart(chart1);
 
@@ -436,7 +484,7 @@ function buildCharts_() {
     .setOption("pieSliceText", "percentage")
     .setOption("legend.position", "right")
     .setOption("width", 500).setOption("height", 350)
-    .setPosition(20, 12, 0, 0)
+    .setPosition(20, 14, 0, 0)
     .build();
   sheet.insertChart(chart2);
 }
@@ -482,6 +530,8 @@ function onOpen() {
     .addItem("Пересчитать всё",           "высчитываниеНагрузки")
     .addItem("Только пересчёт данных",    "recalculateMain_")
     .addItem("Только диаграммы",          "buildCharts_")
+    .addSeparator()
+    .addItem("Вставить чекбоксы",         "insertCheckboxes")
     .addItem("Установить триггеры",       "setupTriggers")
     .addSeparator()
     .addItem("Отладка: ошибки по столам", "TA_DebugDeskErrorCounts")
@@ -532,7 +582,15 @@ function parseNumber_(value) {
   return isNaN(n) ? 0 : n;
 }
 
-function normYesNo_(value) {
+/**
+ * Проверяет значение чекбокса.
+ * Поддерживает: TRUE/FALSE (стандартный чекбокс),
+ *               "Да"/"Нет" (кастомный чекбокс),
+ *               "yes"/"no" (английский вариант).
+ */
+function isChecked_(value) {
+  if (value === true) return true;
+  if (value === false) return false;
   var s = norm_(value);
   return s === "да" || s === "yes";
 }
