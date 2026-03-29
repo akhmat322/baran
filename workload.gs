@@ -454,18 +454,7 @@ function высчитываниеНагрузки() {
  *  МЕНЮ В ИНТЕРФЕЙСЕ
  * ============================================================ */
 
-function onOpen() {
-  SpreadsheetApp.getUi()
-    .createMenu("Нагрузка T&A")
-    .addItem("Пересчитать всё",           "высчитываниеНагрузки")
-    .addItem("Только пересчёт данных",    "recalculateMain_")
-    .addItem("Только диаграммы",          "buildCharts_")
-    .addItem("Установить триггеры",       "setupTriggers")
-    .addSeparator()
-    .addItem("Отладка: ошибки по столам", "TA_DebugDeskErrorCounts")
-    .addItem("Отладка: стажёры по столам","TA_DebugDeskCounts")
-    .addToUi();
-}
+// onOpen определён в confluence_integration.gs (единое меню с Confluence)
 
 
 /* ============================================================
