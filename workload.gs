@@ -1,6 +1,11 @@
 /* ============================================================
  *  Нагрузка T&A — автоматизация Google Sheets
- *  v2.0
+ *  v3.0
+ *  - Колонка C: "Не обработано" (кол-во со статусом "не обработано")
+ *  - Колонка D: "В обработке" (кол-во со статусом "в обработке")
+ *  - Исправлен баг: onChange больше не перезаписывает статусы
+ *  - Добавлена блокировка LockService против race condition
+ *  - Статус читается из колонки J (dropdown), а не R
  * ============================================================ */
 
 // ─── Листы ───────────────────────────────────────────────────
@@ -22,23 +27,25 @@ const STAFF_COL_A      = 1;  // A — заголовок стола / имя
 const STAFF_COL_STATUS = 2;  // B — статус
 
 // ─── Колонки главного листа ──────────────────────────────────
-const MAIN_COL_NAME     = 1;  // A — Сотрудник
-const MAIN_COL_ZONE     = 2;  // B — Зона
-const MAIN_COL_ERRORS   = 3;  // C — Ошибки
-const MAIN_COL_TRAINEES = 4;  // D — Стажёры
-const MAIN_COL_PROJECTS = 5;  // E — Проекты (вручную)
-const MAIN_COL_POINTS   = 6;  // F — Баллы (авто)
-const MAIN_COL_PERCENT  = 7;  // G — %Нагрузки (авто)
+const MAIN_COL_NAME        = 1;  // A — Сотрудник
+const MAIN_COL_ZONE        = 2;  // B — Зона
+const MAIN_COL_NOT_PROC    = 3;  // C — Не обработано (авто)
+const MAIN_COL_IN_PROGRESS = 4;  // D — В обработке (авто)
+const MAIN_COL_TRAINEES    = 5;  // E — Стажёры (авто)
+const MAIN_COL_PROJECTS    = 6;  // F — Проекты (вручную)
+const MAIN_COL_POINTS      = 7;  // G — Баллы (авто)
+const MAIN_COL_PERCENT     = 8;  // H — %Нагрузки (авто)
 
 // ─── Ячейки с настройками баллов (на главном листе) ──────────
-const CFG_POINTS_PER_TRAINEE = "I2";  // Баллы за стажёра  (10)
-const CFG_PCT_PER_TRAINEE    = "I3";  // % за стажёра      (5%)
-const CFG_POINTS_PER_ERROR   = "I4";  // Баллы за ошибку   (2)
-const CFG_PCT_PER_ERROR      = "I5";  // % за ошибку       (1%)
+const CFG_POINTS_PER_TRAINEE = "J2";  // Баллы за стажёра  (10)
+const CFG_PCT_PER_TRAINEE    = "J3";  // % за стажёра      (5%)
+const CFG_POINTS_PER_ERROR   = "J4";  // Баллы за ошибку   (2)
+const CFG_PCT_PER_ERROR      = "J5";  // % за ошибку       (1%)
 
 // ─── Фильтрация ─────────────────────────────────────────────
-const STATUS_TARGET = "не обработано";
-const DAYS_WINDOW   = 30;
+const STATUS_NOT_PROCESSED = "не обработано";
+const STATUS_IN_PROGRESS   = "в обработке";
+const DAYS_WINDOW          = 30;
 
 // ─── Максимум баллов (200 баллов = 100%) ─────────────────────
 const MAX_POINTS = 200;
@@ -53,7 +60,6 @@ const MAX_POINTS = 200;
  * Запускать один раз вручную.
  */
 function setupTriggers() {
-  // Удаляем старые триггеры этого скрипта
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
     var name = trigger.getHandlerFunction();
     if (name === "onEditHandler" || name === "onChangeHandler") {
@@ -93,34 +99,52 @@ function onEditHandler(e) {
     if (col === CHILD_COL_STATUS_DD) {
       mirrorStatusToR_(sheet, e.range.getRow());
     }
-    recalculateMain_();
+    safeRecalculate_();
     return;
   }
 
   // Лист сотрудников
   if (sheetName === STAFF_LIST_SHEET_NAME) {
-    recalculateMain_();
+    safeRecalculate_();
     return;
   }
 
   // Главный лист — зона или проекты
   if (sheetName === MAIN_SHEET_NAME && (col === MAIN_COL_ZONE || col === MAIN_COL_PROJECTS)) {
-    recalculateMain_();
+    safeRecalculate_();
   }
 }
 
-function onChangeHandler() {
-  try {
-    fillStatusMirrorColumnR_();
-  } catch (err) {
-    Logger.log("onChange: ошибка зеркалирования статусов: " + err.message);
+function onChangeHandler(e) {
+  // Не обрабатываем EDIT — это уже делает onEditHandler
+  if (e && e.changeType === "EDIT") return;
+
+  // Структурные изменения (вставка/удаление строк и т.д.) — только пересчёт
+  safeRecalculate_();
+}
+
+
+/* ============================================================
+ *  БЛОКИРОВКА ОТ ПАРАЛЛЕЛЬНОГО ВЫПОЛНЕНИЯ
+ * ============================================================ */
+
+function safeRecalculate_() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    Logger.log("safeRecalculate_: не удалось получить блокировку, пропуск");
+    return;
   }
-  recalculateMain_();
+  try {
+    recalculateMain_();
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 
 /* ============================================================
  *  ЗЕРКАЛИРОВАНИЕ СТАТУСОВ (J → R)
+ *  Только при прямом редактировании ячейки в колонке J
  * ============================================================ */
 
 function mirrorStatusToR_(sheet, row) {
@@ -129,28 +153,14 @@ function mirrorStatusToR_(sheet, row) {
   sheet.getRange(row, CHILD_COL_STATUS_TXT).setValue(String(value || "").trim());
 }
 
-function fillStatusMirrorColumnR_() {
-  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CHILD_SHEET_NAME);
-  if (!sh) return;
-
-  var lastRow = sh.getLastRow();
-  if (lastRow < 2) return;
-
-  var values = sh.getRange(2, CHILD_COL_STATUS_DD, lastRow - 1, 1).getValues();
-  var out = values.map(function (row) {
-    return [String(row[0] || "").trim()];
-  });
-  sh.getRange(2, CHILD_COL_STATUS_TXT, lastRow - 1, 1).setValues(out);
-}
-
 
 /* ============================================================
- *  ГЛАВНЫЙ ПЕРЕСЧЁТ — ошибки, стажёры, баллы, %
+ *  ГЛАВНЫЙ ПЕРЕСЧЁТ — статусы, стажёры, баллы, %
  * ============================================================ */
 
 /**
  * Единая точка пересчёта: читает все данные один раз,
- * записывает колонки C, D, F, G за один проход.
+ * записывает колонки C, D, E, G, H за один проход.
  */
 function recalculateMain_() {
   var ss         = SpreadsheetApp.getActiveSpreadsheet();
@@ -165,8 +175,8 @@ function recalculateMain_() {
   // ── Читаем настройки баллов ──
   var cfg = readConfig_(mainSheet);
 
-  // ── Считаем ошибки и стажёров ──
-  var errorCounts   = countNotProcessedByDesk_(childSheet);
+  // ── Считаем статусы и стажёров ──
+  var statusCounts  = countStatusesByDesk_(childSheet);
   var traineeCounts = countTraineesByDeskStructured_(staffSheet);
 
   // ── Определяем диапазон данных ──
@@ -177,45 +187,48 @@ function recalculateMain_() {
   // ── Batch-чтение зон и проектов ──
   var mainData = mainSheet.getRange(MAIN_START_ROW, 1, numRows, MAIN_COL_PROJECTS).getDisplayValues();
 
-  // ── Формируем выходные колонки C, D, F, G ──
-  var outErrors   = [];
-  var outTrainees = [];
-  var outPoints   = [];
-  var outPercent  = [];
+  // ── Формируем выходные колонки ──
+  var outNotProc    = [];
+  var outInProgress = [];
+  var outTrainees   = [];
+  var outPoints     = [];
+  var outPercent    = [];
 
   for (var i = 0; i < numRows; i++) {
     var zoneKey  = normDeskKey_(mainData[i][MAIN_COL_ZONE - 1]);
     var projects = parseNumber_(mainData[i][MAIN_COL_PROJECTS - 1]);
 
-    var errors   = zoneKey ? getCountForDeskOrGroup_(errorCounts, zoneKey) : 0;
-    var trainees = zoneKey ? getCountForDeskOrGroup_(traineeCounts, zoneKey) : 0;
+    var notProcessed = zoneKey ? getCountForDeskOrGroup_(statusCounts.notProcessed, zoneKey) : 0;
+    var inProgress   = zoneKey ? getCountForDeskOrGroup_(statusCounts.inProgress, zoneKey) : 0;
+    var trainees     = zoneKey ? getCountForDeskOrGroup_(traineeCounts, zoneKey) : 0;
 
-    var points = errors   * cfg.pointsPerError
-               + trainees * cfg.pointsPerTrainee
+    // Баллы считаются по "не обработано" (как раньше по ошибкам)
+    var points = notProcessed * cfg.pointsPerError
+               + trainees    * cfg.pointsPerTrainee
                + projects;
 
-    var pct = errors   * cfg.pctPerError
-            + trainees * cfg.pctPerTrainee;
+    var pct = notProcessed * cfg.pctPerError
+            + trainees     * cfg.pctPerTrainee;
 
-    // Добавляем % от проектов: проекты / MAX_POINTS
     if (MAX_POINTS > 0) {
       pct += projects / MAX_POINTS;
     }
 
-    // Ограничиваем 100%
     if (pct > 1) pct = 1;
 
-    outErrors.push([errors]);
+    outNotProc.push([notProcessed]);
+    outInProgress.push([inProgress]);
     outTrainees.push([trainees]);
     outPoints.push([points]);
     outPercent.push([pct]);
   }
 
   // ── Batch-запись ──
-  mainSheet.getRange(MAIN_START_ROW, MAIN_COL_ERRORS,   numRows, 1).setValues(outErrors);
-  mainSheet.getRange(MAIN_START_ROW, MAIN_COL_TRAINEES, numRows, 1).setValues(outTrainees);
-  mainSheet.getRange(MAIN_START_ROW, MAIN_COL_POINTS,   numRows, 1).setValues(outPoints);
-  mainSheet.getRange(MAIN_START_ROW, MAIN_COL_PERCENT,  numRows, 1).setNumberFormat("0%").setValues(outPercent);
+  mainSheet.getRange(MAIN_START_ROW, MAIN_COL_NOT_PROC,    numRows, 1).setValues(outNotProc);
+  mainSheet.getRange(MAIN_START_ROW, MAIN_COL_IN_PROGRESS, numRows, 1).setValues(outInProgress);
+  mainSheet.getRange(MAIN_START_ROW, MAIN_COL_TRAINEES,    numRows, 1).setValues(outTrainees);
+  mainSheet.getRange(MAIN_START_ROW, MAIN_COL_POINTS,      numRows, 1).setValues(outPoints);
+  mainSheet.getRange(MAIN_START_ROW, MAIN_COL_PERCENT,     numRows, 1).setNumberFormat("0%").setValues(outPercent);
 }
 
 
@@ -239,15 +252,19 @@ function readConfig_(mainSheet) {
 
 
 /* ============================================================
- *  ПОДСЧЁТ ОШИБОК ПО СТОЛАМ
+ *  ПОДСЧЁТ СТАТУСОВ ПО СТОЛАМ
+ *  Читает из колонки J (dropdown), НЕ из R
+ *  Возвращает { notProcessed: Map, inProgress: Map }
  * ============================================================ */
 
-function countNotProcessedByDesk_(childSheet) {
+function countStatusesByDesk_(childSheet) {
   var lastRow = childSheet.getLastRow();
-  var map = new Map();
-  if (lastRow < 2) return map;
+  var notProcessed = new Map();
+  var inProgress   = new Map();
 
-  var width = Math.max(CHILD_COL_TABLE, CHILD_COL_DATE, CHILD_COL_STATUS_TXT);
+  if (lastRow < 2) return { notProcessed: notProcessed, inProgress: inProgress };
+
+  var width = Math.max(CHILD_COL_TABLE, CHILD_COL_DATE, CHILD_COL_STATUS_DD);
   var data  = childSheet.getRange(2, 1, lastRow - 1, width).getValues();
 
   var now  = new Date();
@@ -255,16 +272,20 @@ function countNotProcessedByDesk_(childSheet) {
 
   for (var i = 0; i < data.length; i++) {
     var deskKey = normDeskKey_(data[i][CHILD_COL_TABLE - 1]);
-    var status  = normStatus_(data[i][CHILD_COL_STATUS_TXT - 1]);
-    var d       = toDate_(data[i][CHILD_COL_DATE - 1]);
+    var status  = normStatus_(data[i][CHILD_COL_STATUS_DD - 1]);  // J — dropdown
+    var d       = toDate_(data[i][CHILD_COL_DATE - 1]);           // O — дата
 
     if (!deskKey) continue;
-    if (status !== STATUS_TARGET) continue;
     if (!d || d < from || d > now) continue;
 
-    map.set(deskKey, (map.get(deskKey) || 0) + 1);
+    if (status === STATUS_NOT_PROCESSED) {
+      notProcessed.set(deskKey, (notProcessed.get(deskKey) || 0) + 1);
+    } else if (status === STATUS_IN_PROGRESS) {
+      inProgress.set(deskKey, (inProgress.get(deskKey) || 0) + 1);
+    }
   }
-  return map;
+
+  return { notProcessed: notProcessed, inProgress: inProgress };
 }
 
 
@@ -303,11 +324,9 @@ function countTraineesByDeskStructured_(staffSheet) {
  * ============================================================ */
 
 function getCountForDeskOrGroup_(countsMap, key) {
-  // Если ключ содержит цифру — ищем точное совпадение
   if (/\d/.test(key)) {
     return countsMap.get(key) || 0;
   }
-  // Иначе суммируем все столы группы
   var sum = 0;
   countsMap.forEach(function (count, deskKey) {
     if (deskKey === key || deskKey.indexOf(key + " ") === 0) {
@@ -338,16 +357,13 @@ function isDeskHeader_(colA, colB) {
  *  ФОРМАТИРОВАНИЕ И ДИАГРАММЫ
  * ============================================================ */
 
-/**
- * Применяет условное форматирование к колонке %Нагрузки.
- */
 function applyConditionalFormatting_() {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(MAIN_SHEET_NAME);
   if (!sheet) return;
 
   sheet.setFrozenRows(2);
 
-  var percentRange = sheet.getRange("G3:G1000");
+  var percentRange = sheet.getRange("H3:H1000");
   sheet.clearConditionalFormatRules();
 
   var rules = [
@@ -368,9 +384,6 @@ function applyConditionalFormatting_() {
   sheet.autoResizeColumns(1, MAIN_COL_PERCENT);
 }
 
-/**
- * Создаёт круговые диаграммы нагрузки и зон.
- */
 function buildCharts_() {
   var ss    = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(MAIN_SHEET_NAME);
@@ -379,23 +392,20 @@ function buildCharts_() {
   var lastRow = getMainLastDataRow_(sheet, MAIN_START_ROW);
   if (lastRow < MAIN_START_ROW) return;
 
-  // Удаляем старые диаграммы
   sheet.getCharts().forEach(function (c) { sheet.removeChart(c); });
 
-  // 1. Нагрузка сотрудников
   var chart1 = sheet.newChart()
     .setChartType(Charts.ChartType.PIE)
     .addRange(sheet.getRange("A" + MAIN_START_ROW + ":A" + lastRow))
-    .addRange(sheet.getRange("G" + MAIN_START_ROW + ":G" + lastRow))
+    .addRange(sheet.getRange("H" + MAIN_START_ROW + ":H" + lastRow))
     .setOption("title", "Нагрузка сотрудников")
     .setOption("pieSliceText", "percentage")
     .setOption("legend.position", "right")
     .setOption("width", 500).setOption("height", 350)
-    .setPosition(MAIN_START_ROW, 12, 0, 0)
+    .setPosition(MAIN_START_ROW, 13, 0, 0)
     .build();
   sheet.insertChart(chart1);
 
-  // 2. Распределение по зонам
   var zoneData = buildZoneData_(sheet, lastRow);
   var tempSheet = getOrCreateHiddenSheet_(ss, "_данные_зон");
 
@@ -414,7 +424,7 @@ function buildCharts_() {
     .setOption("pieSliceText", "percentage")
     .setOption("legend.position", "right")
     .setOption("width", 500).setOption("height", 350)
-    .setPosition(20, 12, 0, 0)
+    .setPosition(20, 13, 0, 0)
     .build();
   sheet.insertChart(chart2);
 }
@@ -462,8 +472,8 @@ function onOpen() {
     .addItem("Только диаграммы",          "buildCharts_")
     .addItem("Установить триггеры",       "setupTriggers")
     .addSeparator()
-    .addItem("Отладка: ошибки по столам", "TA_DebugDeskErrorCounts")
-    .addItem("Отладка: стажёры по столам","TA_DebugDeskCounts")
+    .addItem("Отладка: статусы по столам",  "TA_DebugStatusCounts")
+    .addItem("Отладка: стажёры по столам",  "TA_DebugDeskCounts")
     .addToUi();
 }
 
@@ -523,13 +533,19 @@ function toDate_(value) {
  *  ОТЛАДКА
  * ============================================================ */
 
-function TA_DebugDeskErrorCounts() {
+function TA_DebugStatusCounts() {
   var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CHILD_SHEET_NAME);
   if (!sh) { Logger.log("Лист не найден: " + CHILD_SHEET_NAME); return; }
 
-  var counts = countNotProcessedByDesk_(sh);
-  Logger.log("=== НЕОБРАБОТАННЫЕ ОШИБКИ ПО СТОЛАМ ===");
-  counts.forEach(function (count, desk) {
+  var counts = countStatusesByDesk_(sh);
+
+  Logger.log("=== НЕ ОБРАБОТАНО ПО СТОЛАМ ===");
+  counts.notProcessed.forEach(function (count, desk) {
+    Logger.log(desk + ": " + count);
+  });
+
+  Logger.log("=== В ОБРАБОТКЕ ПО СТОЛАМ ===");
+  counts.inProgress.forEach(function (count, desk) {
     Logger.log(desk + ": " + count);
   });
 }
